@@ -20,6 +20,7 @@ export const DEFAULT_CONFIG = {
   display: 'all',                          // the line shown to the user: "all" | "changes" | "off"
   maxDenials: 3,                           // loop guard: after this many denials in one prompt, let calls through
   pinTools: true,                          // hooks module: load the two search tools up front (not behind ToolSearch)
+  allowSearchTools: false,                 // approve the two read-only search tools without a permission prompt
   exemptPromptFiles: true,                 // Read/Grep/Glob of a path the user named in the prompt
   exemptWrittenFiles: true,                // Read of a file the model wrote or edited in this session
   exemptOutsideProject: true,              // targets outside the indexed project folder (/tmp, ~/.claude, ...)
@@ -253,8 +254,9 @@ export function shellTokens(cmd) {
       continue;
     }
     if (ch === '>' || ch === '<') {
-      push();
+      // a file-descriptor number right before it belongs to the operator: 2>/dev/null, 2>&1
       let op = ch;
+      if (has && /^\d+$/.test(cur)) { op = cur + ch; cur = ''; has = false; } else push();
       while (cmd[i + 1] === '>' || cmd[i + 1] === '<' || cmd[i + 1] === '&') op += cmd[++i];
       out.push({ op });
       continue;
@@ -265,10 +267,27 @@ export function shellTokens(cmd) {
   return out;
 }
 
+// Does this command send its standard output to a file? `2>/dev/null`, `2>&1`, `> /dev/null` don't count.
+function writesFile(seg) {
+  for (let i = 0; i < seg.length; i++) {
+    const t = seg[i];
+    if (typeof t !== 'object') continue;
+    const m = /^(\d*|&)(>>?|>\|)(&?)$/.exec(t.op);
+    if (!m) continue;
+    if (m[1] && m[1] !== '1' && m[1] !== '&') continue;   // another fd (2>...)
+    if (m[3]) continue;                                   // >&2: a dup, no file
+    const target = seg[i + 1];
+    if (typeof target === 'string' && target !== '/dev/null') return true;
+  }
+  return false;
+}
+
 // The commands of a Bash line that search or read files: [{ cmd, args }] for each one that starts a pipeline
 // (a `grep` after a `|` filters another command's output and reads no file). Writes (`cat > f`) don't count.
 export function bashSearches(command) {
-  const toks = shellTokens(String(command || ''));
+  // Heredoc bodies are data, not commands: keep only the line that opens them.
+  const text = String(command || '').replace(/(<<-?\s*(['"]?)([A-Za-z_][\w-]*)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3[ \t]*(?=\n|$)/g, '$1');
+  const toks = shellTokens(text);
   const segs = [];
   let seg = [], first = true;
   for (const t of toks) {
@@ -288,7 +307,6 @@ export function bashSearches(command) {
       continue;
     }
     if (!isFirst || !s.length) continue;
-    if (s.some((t) => typeof t === 'object' && t.op.startsWith('>'))) continue; // output redirected: a write
     const words = [];
     for (let i = 0; i < s.length; i++) {
       const t = s[i];
@@ -301,16 +319,21 @@ export function bashSearches(command) {
     if (i >= words.length) continue;
     let name = basename(words[i]);
     let args = words.slice(i + 1);
+    let where = cd;
     if (name === 'git') {
       let j = 0;
-      while (j < args.length && args[j].startsWith('-')) j += ['-C', '-c', '--git-dir', '--work-tree'].includes(args[j]) ? 2 : 1;
+      while (j < args.length && args[j].startsWith('-')) {
+        if (args[j] === '-C' && args[j + 1]) where = args[j + 1].startsWith('/') || args[j + 1].startsWith('~') || !where ? args[j + 1] : `${where}/${args[j + 1]}`;
+        j += ['-C', '-c', '--git-dir', '--work-tree'].includes(args[j]) ? 2 : 1;
+      }
       if (args[j] !== 'grep') continue;
       name = 'git-grep';
       args = args.slice(j + 1);
     }
     if (name === 'sed' && !(args.some((a) => /^-[a-zA-Z]*n/.test(a) || a === '--quiet' || a === '--silent') && !args.some((a) => /^-[a-zA-Z]*i/.test(a) || a.startsWith('--in-place')))) continue;
     if (!SEARCHERS.has(name) && !READERS.has(name)) continue;
-    found.push({ cmd: name, args, ...(cd ? { cd } : {}) });
+    if (READERS.has(name) && writesFile(s)) continue;  // `cat a > b`, `sed -n p x > y`: a copy, not a look around
+    found.push({ cmd: name, args, ...(where ? { cd: where } : {}) });
   }
   return found;
 }
@@ -340,13 +363,13 @@ function bashTargets(io, s, cwd) {
 // Paths a prompt names: absolute or relative paths that exist, and bare file names with an extension.
 export function promptPaths(io, prompt, cwd, root) {
   const paths = new Set(), names = new Set();
-  const text = String(prompt || '').slice(0, 20000);
+  const text = String(prompt || '').slice(0, 20000).replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, ' ');  // URLs are not files
   const re = /@?(?:~|\.{1,2})?\/?[\w@%+=:,.-]+(?:\/[\w@%+=:,.-]+)*/g;
   for (let m of text.match(re) || []) {
     if (m.startsWith('@')) m = m.slice(1);
     m = m.replace(/[.,:;]+$/, '');
     if (!m || /^[a-z]+:\/\//i.test(m) || m.includes('://')) continue;
-    const hasExt = /\.[A-Za-z0-9]{1,8}$/.test(basename(m)) && !/^\d+(\.\d+)+$/.test(m);
+    const hasExt = /\.[A-Za-z0-9]{1,8}$/.test(basename(m)) && !/^v?\d+(\.\d+)+$/.test(m) && !/\.\d+$/.test(m);  // not versions or numbers
     if (m.includes('/') || m.startsWith('~')) {
       for (const base of new Set([cwd, root].filter(Boolean))) {
         const p = absPath(io, m, base);
@@ -491,7 +514,7 @@ export function decide(input, io = makeIO()) {
     if (state.fresh) pruneState(io, cfg);
     const firstPrompt = !!state.fresh;
     Object.assign(state, {
-      prompt_n: (state.prompt_n || 0) + 1, searched: false, denials: 0, offLogged: false,
+      prompt_n: (state.prompt_n || 0) + 1, searched: false, denials: 0, attempted: 0, offLogged: false, searchFailed: false, letThrough: false,
       named: st.active || !io.env.ENOWX_SESSION ? promptPaths(io, input.prompt, cwd, st.root) : { paths: [], names: [] },
     });
     let output;
@@ -529,6 +552,35 @@ export function decide(input, io = makeIO()) {
     return {};
   }
 
+  // The RAG search itself was refused (no permission, auto mode's classifier) or failed: the model can't
+  // satisfy the gate, so open it for the rest of this prompt instead of making it loop.
+  if ((event === 'PermissionDenied' || event === 'PostToolUseFailure') && SEARCH_TOOLS.includes(tool)) {
+    if (io.env.ENOWX_SESSION) return {};
+    const state = loadState(io, sid);
+    const first = !state.searchFailed;
+    state.searchFailed = true;
+    saveState(io, sid, state);
+    const why = event === 'PermissionDenied' ? 'RAG search not permitted' : 'RAG search failed';
+    writeLog(io, { ...base, decision: 'search-failed', reason: why, detail: String(input.error || input.reason || '').slice(0, 120) || undefined }, cfg);
+    return first && show(cfg, 'change')
+      ? { output: { systemMessage: `${ICON} rag-first: ${why}; Grep/Glob/Read/Bash let through for this prompt` } }
+      : {};
+  }
+
+  // The model is calling a RAG search: note it. If no PostToolUse follows (permission refused, server error),
+  // the next gated call is let through. With allowSearchTools, approve the read-only search outright.
+  if (event === 'PreToolUse' && SEARCH_TOOLS.includes(tool)) {
+    if (io.env.ENOWX_SESSION) return {};
+    const state = loadState(io, sid);
+    state.attempted = (state.attempted || 0) + 1;
+    saveState(io, sid, state);
+    if (cfg.allowSearchTools) {
+      writeLog(io, { ...base, decision: 'approve', reason: 'allowSearchTools', project_id: input.tool_input?.project_id }, cfg);
+      return { output: { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'rag-first: read-only RAG search (allowSearchTools)' } } };
+    }
+    return {};
+  }
+
   if (event === 'PreToolUse') {
     if (!cfg.gatedTools.includes(tool)) return {};
     if (io.env.ENOWX_SESSION) return {};
@@ -549,6 +601,19 @@ export function decide(input, io = makeIO()) {
     }
     if (state.searched) {
       writeLog(io, { ...base, decision: 'allow', project_id: st.id, detail: c.target }, cfg);
+      return {};
+    }
+    if (!state.searchFailed && (state.attempted || 0) > 0) {
+      state.searchFailed = true;   // a search was called this prompt but never completed
+      saveState(io, sid, state);
+      writeLog(io, { ...base, decision: 'search-failed', project_id: st.id, reason: 'a RAG search was called but did not complete (refused or failed)' }, cfg);
+      writeLog(io, { ...base, decision: 'let-through', project_id: st.id, reason: 'the RAG search was refused or failed this prompt', detail: c.target }, cfg);
+      return show(cfg, 'change')
+        ? { output: { systemMessage: `${ICON} rag-first: the RAG search didn't complete (refused or failed); ${tool} let through for this prompt` } }
+        : {};
+    }
+    if (state.searchFailed) {
+      writeLog(io, { ...base, decision: 'let-through', project_id: st.id, reason: 'the RAG search was refused or failed this prompt', detail: c.target }, cfg);
       return {};
     }
     const mcp = mcpStatus(io, input, state, ctx.cwd, st.root);

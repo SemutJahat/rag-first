@@ -29,7 +29,7 @@ const parse = (text) => text.split('\n').filter(Boolean)
   .map((l) => { try { return JSON.parse(l); } catch { return null; } })
   .filter((e) => e && (!session || String(e.session_id || '').startsWith(session)));
 
-const COLS = [['time', 8], ['session', 8], ['event', 12], ['tool', 26], ['decision', 11], ['project', 14], ['detail', 60]];
+const COLS = [['time', 8], ['session', 8], ['event', 16], ['tool', 26], ['decision', 13], ['project', 14], ['detail', 56]];
 const fit = (s, w) => { s = String(s ?? ''); return s.length > w ? s.slice(0, w - 1) + '…' : s.padEnd(w); };
 const hhmmss = (ts) => { const d = new Date(ts); return Number.isNaN(+d) ? '' : d.toTimeString().slice(0, 8); };
 const row = (e) => ({

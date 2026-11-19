@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+# never publish: logs, state and run captures
+*.log
+gate.jsonl
+state/
+runs/
+# written by Claude Code beside a hot-reloaded hooks module
+.claude-plugin/types/

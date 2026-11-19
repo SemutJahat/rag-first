@@ -1,0 +1,12 @@
+{
+  "mode": "strict",
+  "gatedTools": ["Grep", "Glob", "Read", "Bash"],
+  "display": "all",
+  "maxDenials": 3,
+  "pinTools": true,
+  "exemptPromptFiles": true,
+  "exemptWrittenFiles": true,
+  "exemptOutsideProject": true,
+  "exemptNonText": true,
+  "projects": {}
+}

@@ -1,0 +1,19 @@
+{
+  "name": "rag-first",
+  "version": "0.1.0",
+  "description": "Makes Claude Code search the project's enowx-rag RAG before it greps or reads around: Grep, Glob, Read and search-like Bash wait until one RAG search has run for the prompt.",
+  "author": {
+    "name": "SemutJahat",
+    "url": "https://github.com/SemutJahat"
+  },
+  "homepage": "https://github.com/SemutJahat/rag-first",
+  "repository": "https://github.com/SemutJahat/rag-first",
+  "license": "MIT",
+  "keywords": [
+    "rag",
+    "enowx-rag",
+    "mcp",
+    "hooks",
+    "tokens"
+  ]
+}

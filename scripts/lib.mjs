@@ -9,6 +9,8 @@ export const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 // The two enowx-rag tools that count as "searched the RAG".
 export const SEARCH_TOOLS = ['mcp__enowx-rag__rag_retrieve_context', 'mcp__enowx-rag__rag_semantic_search'];
+// The tool that puts a folder into enowx-rag (and into ~/.enowx-rag/project_dirs.json).
+export const INDEX_TOOL = 'mcp__enowx-rag__rag_index_project';
 export const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 export const MODES = ['strict', 'nudge', 'off'];
 export const DISPLAYS = ['all', 'changes', 'off'];
@@ -20,6 +22,7 @@ export const DEFAULT_CONFIG = {
   display: 'all',                          // the line shown to the user: "all" | "changes" | "off"
   maxDenials: 3,                           // loop guard: after this many denials in one prompt, let calls through
   pinTools: true,                          // hooks module: load the two search tools up front (not behind ToolSearch)
+  indexNew: true,                          // a git project not indexed yet: hold the gated tools until rag_index_project
   allowSearchTools: false,                 // approve the two read-only search tools without a permission prompt
   exemptPromptFiles: true,                 // Read/Grep/Glob of a path the user named in the prompt
   exemptWrittenFiles: true,                // Read of a file the model wrote or edited in this session
@@ -148,7 +151,8 @@ export function projectStatus(io, cwd, cfg) {
   }
   const root = gitRoot(io, c);
   if (!root || skip.includes(root)) return { active: false, reason: 'not a code project (no git root)', quiet: true };
-  return { active: false, reason: `project not indexed in enowx-rag (would be project_id "${projectIdCandidates(root)[0]}")` };
+  const ids = projectIdCandidates(root);
+  return { active: false, unindexed: true, id: ids[0], altId: ids[1], root, reason: `project not indexed in enowx-rag (would be project_id "${ids[0]}")` };
 }
 
 // ---- is the enowx-rag MCP server in this session? ---------------------------------------------------
@@ -489,6 +493,19 @@ export function denyReason(id, tool, deferred = true) {
     + `identifiers and to read the files and lines RAG pointed to.`;
 }
 
+// For a git project that isn't in enowx-rag yet (indexNew).
+export function indexText(st) {
+  const alt = st.altId ? ` If rag_index_project refuses that id because it already belongs to another folder, use "${st.altId}".` : '';
+  return `rag-first: this project is not indexed in enowx-rag yet. Call ${INDEX_TOOL} with project_id "${st.id}" and `
+    + `directory "${st.root}" now, before anything else, even if the folder holds little code so far: it is indexed once `
+    + `and re-synced automatically before every search after that.${alt}`;
+}
+
+export function indexDenyReason(st, tool, deferred = true) {
+  const load = deferred ? ` If that tool isn't loaded yet, load it with ToolSearch (query "select:${INDEX_TOOL}").` : '';
+  return `${indexText(st)}${load} Then search it with ${SEARCH_TOOLS[0]} before using ${tool} to look around.`;
+}
+
 export function nudgeText(id) {
   return `rag-first reminder: this project is indexed in enowx-rag (project_id "${id}"). Before grepping or reading `
     + `around, one call to ${SEARCH_TOOLS[0]} or ${SEARCH_TOOLS[1]} usually finds the right files faster and cheaper.`;
@@ -515,15 +532,24 @@ export function decide(input, io = makeIO()) {
     const firstPrompt = !!state.fresh;
     Object.assign(state, {
       prompt_n: (state.prompt_n || 0) + 1, searched: false, denials: 0, attempted: 0, offLogged: false, searchFailed: false, letThrough: false,
+      indexAttempted: 0, indexFailed: false,
       named: st.active || !io.env.ENOWX_SESSION ? promptPaths(io, input.prompt, cwd, st.root) : { paths: [], names: [] },
     });
     let output;
-    if (!st.active && show(cfg, 'info') && !state.offShown && !st.quiet) {
+    const toIndex = st.unindexed && cfg.indexNew && !state.indexed && mcpStatus(io, input, state, resolve(cwd), st.root).ok;
+    if (toIndex) {
+      // Every prompt until it is indexed: the model is told what to call, the user sees it once.
+      output = { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: indexText(st) } };
+      if (show(cfg, 'info') && !state.indexShown) {
+        output.systemMessage = `${ICON} rag-first: project not indexed in enowx-rag yet · asked Claude to index it as "${st.id}"`;
+        state.indexShown = true;
+      }
+    } else if (!st.active && show(cfg, 'info') && !state.offShown && !st.quiet) {
       output = { systemMessage: `${ICON} rag-first off here: ${st.reason}` };
       state.offShown = true;
     }
     saveState(io, sid, state);
-    writeLog(io, { ...base, decision: 'reset', project_id: st.id, reason: st.active ? undefined : st.reason, first: firstPrompt || undefined }, cfg);
+    writeLog(io, { ...base, decision: toIndex ? 'index-needed' : 'reset', project_id: st.id, reason: st.active ? undefined : st.reason, first: firstPrompt || undefined }, cfg);
     return output ? { output } : {};
   }
 
@@ -540,6 +566,14 @@ export function decide(input, io = makeIO()) {
       writeLog(io, { ...base, decision: 'searched', project_id: pid, detail: String(input.tool_input?.query || '').slice(0, 80) }, cfg);
       if (!was && show(cfg, 'info')) return { output: { systemMessage: `${ICON} rag-first: RAG searched${pid ? ` (${pid})` : ''} · Grep/Glob/Read/Bash open for this prompt` } };
       return {};
+    }
+    if (tool === INDEX_TOOL) {
+      state.indexed = true;
+      state.mcp = true;
+      saveState(io, sid, state);
+      const pid = input.tool_input?.project_id;
+      writeLog(io, { ...base, decision: 'indexed', project_id: pid, detail: String(input.tool_input?.directory || '').slice(0, 120) }, cfg);
+      return show(cfg, 'info') ? { output: { systemMessage: `${ICON} rag-first: project indexed${pid ? ` (${pid})` : ''} · the RAG gate is on here now` } } : {};
     }
     if (WRITE_TOOLS.has(tool)) {
       const p = input.tool_input?.file_path || input.tool_input?.notebook_path;
@@ -567,6 +601,28 @@ export function decide(input, io = makeIO()) {
       : {};
   }
 
+  // Indexing was refused or failed: don't hold the tools hostage for the rest of this prompt.
+  if ((event === 'PermissionDenied' || event === 'PostToolUseFailure') && tool === INDEX_TOOL) {
+    if (io.env.ENOWX_SESSION) return {};
+    const state = loadState(io, sid);
+    const first = !state.indexFailed;
+    state.indexFailed = true;
+    saveState(io, sid, state);
+    const why = event === 'PermissionDenied' ? 'indexing not permitted' : 'indexing failed';
+    writeLog(io, { ...base, decision: 'index-failed', reason: why, detail: String(input.error || input.reason || '').slice(0, 120) || undefined }, cfg);
+    return first && show(cfg, 'change')
+      ? { output: { systemMessage: `${ICON} rag-first: ${why}; Grep/Glob/Read/Bash let through for this prompt` } }
+      : {};
+  }
+
+  if (event === 'PreToolUse' && tool === INDEX_TOOL) {
+    if (io.env.ENOWX_SESSION) return {};
+    const state = loadState(io, sid);
+    state.indexAttempted = (state.indexAttempted || 0) + 1;
+    saveState(io, sid, state);
+    return {};
+  }
+
   // The model is calling a RAG search: note it. If no PostToolUse follows (permission refused, server error),
   // the next gated call is let through. With allowSearchTools, approve the read-only search outright.
   if (event === 'PreToolUse' && SEARCH_TOOLS.includes(tool)) {
@@ -592,18 +648,30 @@ export function decide(input, io = makeIO()) {
       if (!state.offLogged) { writeLog(io, { ...base, decision: 'off', reason }, cfg); state.offLogged = true; saveState(io, sid, state); }
       return {};
     };
-    if (!st.active) return offOnce(st.reason);
+    const toIndex = !st.active && st.unindexed && cfg.indexNew;
+    if (!st.active && !toIndex) return offOnce(st.reason);
     const ctx = { io, cwd: resolve(cwd), root: st.root, state, cfg };
     const c = classify(io, tool, input.tool_input, ctx);
     if (!c.gated) {
       if (c.exempt) writeLog(io, { ...base, decision: 'exempt', project_id: st.id, reason: c.exempt, detail: c.target }, cfg);
       return {};
     }
-    if (state.searched) {
+    if (toIndex) {
+      // Not indexed yet: only rag_index_project opens the gate (a search of an empty project finds nothing).
+      if (state.indexed) {
+        writeLog(io, { ...base, decision: 'allow', project_id: st.id, reason: 'indexed in this session', detail: c.target }, cfg);
+        return {};
+      }
+      if (state.indexFailed || (state.indexAttempted || 0) > 0) {
+        if (!state.indexFailed) { state.indexFailed = true; saveState(io, sid, state); }
+        writeLog(io, { ...base, decision: 'let-through', project_id: st.id, reason: 'indexing was refused, failed or did not complete this prompt', detail: c.target }, cfg);
+        return {};
+      }
+    } else if (state.searched) {
       writeLog(io, { ...base, decision: 'allow', project_id: st.id, detail: c.target }, cfg);
       return {};
     }
-    if (!state.searchFailed && (state.attempted || 0) > 0) {
+    if (!toIndex && !state.searchFailed && (state.attempted || 0) > 0) {
       state.searchFailed = true;   // a search was called this prompt but never completed
       saveState(io, sid, state);
       writeLog(io, { ...base, decision: 'search-failed', project_id: st.id, reason: 'a RAG search was called but did not complete (refused or failed)' }, cfg);
@@ -612,7 +680,7 @@ export function decide(input, io = makeIO()) {
         ? { output: { systemMessage: `${ICON} rag-first: the RAG search didn't complete (refused or failed); ${tool} let through for this prompt` } }
         : {};
     }
-    if (state.searchFailed) {
+    if (!toIndex && state.searchFailed) {
       writeLog(io, { ...base, decision: 'let-through', project_id: st.id, reason: 'the RAG search was refused or failed this prompt', detail: c.target }, cfg);
       return {};
     }
@@ -625,23 +693,23 @@ export function decide(input, io = makeIO()) {
       saveState(io, sid, state);
       writeLog(io, { ...base, decision: 'let-through', project_id: st.id, reason: `${state.denials} denials this prompt (maxDenials ${cfg.maxDenials})`, detail: c.target }, cfg);
       return first && show(cfg, 'change')
-        ? { output: { systemMessage: `${ICON} rag-first: let ${tool} through after ${state.denials} denials without a RAG search (loop guard)` } }
+        ? { output: { systemMessage: `${ICON} rag-first: let ${tool} through after ${state.denials} denials without ${toIndex ? 'indexing' : 'a RAG search'} (loop guard)` } }
         : {};
     }
     state.denials = (state.denials || 0) + 1;
     saveState(io, sid, state);
     const label = `${state.denials}/${cfg.maxDenials}`;
+    const what = toIndex ? 'indexing' : 'a RAG search';
     if (cfg.mode === 'nudge') {
-      writeLog(io, { ...base, decision: 'nudge', project_id: st.id, detail: c.target, n: state.denials }, cfg);
-      const output = { hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: nudgeText(st.id) } };
-      if (show(cfg, 'change')) output.systemMessage = `${ICON} rag-first: reminded to search RAG (${st.id}) before ${tool} · ${label}`;
+      writeLog(io, { ...base, decision: 'nudge', project_id: st.id, reason: toIndex ? 'not indexed' : undefined, detail: c.target, n: state.denials }, cfg);
+      const output = { hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: toIndex ? indexText(st) : nudgeText(st.id) } };
+      if (show(cfg, 'change')) output.systemMessage = `${ICON} rag-first: reminded to ${toIndex ? 'index' : 'search'} RAG (${st.id}) before ${tool} · ${label}`;
       return { output };
     }
-    writeLog(io, { ...base, decision: 'deny', project_id: st.id, detail: c.target, n: state.denials, mcp: mcp.via }, cfg);
-    const output = {
-      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: denyReason(st.id, tool, !state.pinned) },
-    };
-    if (show(cfg, 'change')) output.systemMessage = `${ICON} rag-first: held ${tool} until a RAG search (${st.id}) · ${label}`;
+    writeLog(io, { ...base, decision: 'deny', project_id: st.id, reason: toIndex ? 'not indexed' : undefined, detail: c.target, n: state.denials, mcp: mcp.via }, cfg);
+    const reason = toIndex ? indexDenyReason(st, tool, !state.pinned) : denyReason(st.id, tool, !state.pinned);
+    const output = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
+    if (show(cfg, 'change')) output.systemMessage = `${ICON} rag-first: held ${tool} until ${what} (${st.id}) · ${label}`;
     return { output };
   }
   return {};
@@ -661,8 +729,9 @@ export function pinDecision(input, io = makeIO()) {
   } catch {}
   if (cfg.mode === 'off' || !cfg.pinTools) return { pin: false, reason: cfg.mode === 'off' ? 'mode off' : 'pinTools false' };
   const st = projectStatus(io, input?.cwd, cfg);
-  if (!st.active) return { pin: false, reason: st.reason };
+  const toIndex = !st.active && st.unindexed && cfg.indexNew;
+  if (!st.active && !toIndex) return { pin: false, reason: st.reason };
   if (sid) { const s = loadState(io, sid); s.pinned = true; saveState(io, sid, s); }
-  writeLog(io, { session_id: sid, event: 'tool.describe', decision: 'pin', project_id: st.id }, cfg);
-  return { pin: true, project_id: st.id };
+  writeLog(io, { session_id: sid, event: 'tool.describe', decision: 'pin', project_id: st.id, reason: toIndex ? 'not indexed: index tool too' : undefined }, cfg);
+  return toIndex ? { pin: true, index: true, project_id: st.id } : { pin: true, project_id: st.id };
 }

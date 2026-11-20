@@ -63,9 +63,27 @@ The gate allows everything (silently, or with one short note per session) when:
 | `mode` is `"off"` | config | none |
 | inside an enowX session | `ENOWX_SESSION` is set (enowX has its own RAG and injects it) | none |
 | not a code project | cwd is `~`, `~/Desktop`, `~/Downloads` or `~/Documents`, or has no git root | none |
-| the project isn't indexed in enowx-rag | no folder in `~/.enowx-rag/project_dirs.json` (or in config `projects`) holds the cwd | `🔎 rag-first off here: project not indexed in enowx-rag (would be project_id "x")` |
+| the project isn't indexed and `indexNew` is `false` (or enowx-rag isn't in the session) | no folder in `~/.enowx-rag/project_dirs.json` (or in config `projects`) holds the cwd | `🔎 rag-first off here: project not indexed in enowx-rag (would be project_id "x")` |
 | enowx-rag isn't in this session | the session's own transcript records its tools (see below); without a transcript, `~/.claude.json` and `.mcp.json` | logged, not shown |
 | any error in the hook | `try`/`catch` around everything; the process always exits 0 and prints nothing | logged as `error` |
+
+### A project that isn't indexed yet (`indexNew`, on by default)
+
+A git project that no folder in `~/.enowx-rag/project_dirs.json` holds is not left alone: a brand-new project is
+the one most likely to be forgotten, since there is no code to search at first and nothing asks again later.
+While enowx-rag is in the session:
+
+- **Every prompt** adds a line to the model's context: call `rag_index_project` with project_id `"x"` and the
+  git root as directory, now, even if the folder holds little code yet (and the `<parent>-<folder>` id if `x`
+  belongs to another folder). The user sees `🔎 rag-first: project not indexed in enowx-rag yet · asked Claude to
+  index it as "x"` once per session.
+- **Grep, Glob, Read and search-like Bash are held** (same exemptions, loop guard and nudge mode as the search
+  gate) until `rag_index_project` succeeds. A RAG search does not count here: the project is empty.
+- **After indexing**, `project_dirs.json` lists the folder and the normal search gate takes over.
+- **Fail-open:** a refused, failed or unfinished `rag_index_project` lets the tools through for the rest of the
+  prompt, and the hooks module pins `rag_index_project` alongside the search tools so it is one call away.
+
+Set `"indexNew": false` to go back to the old behaviour: off, with one note per session.
 
 **Project id.** The id is the one of the enowx-rag project whose recorded folder holds the cwd (the longest match,
 so a monorepo sub-project wins), read from `~/.enowx-rag/project_dirs.json`, which `rag_index_project` writes. That
@@ -299,6 +317,7 @@ claude plugin uninstall rag-first@semutjahat --scope user
   "display": "all",            // the line under calls: "all" | "changes" | "off"
   "maxDenials": 3,             // loop guard: after this many denials in one prompt, let calls through
   "pinTools": true,            // load the two search tools up front (hooks module)
+  "indexNew": true,            // an unindexed git project: ask for rag_index_project and hold tools until it runs
   "allowSearchTools": false,   // approve the two read-only search tools without a permission prompt
   "exemptPromptFiles": true,   // never hold a file the user named in the prompt
   "exemptWrittenFiles": true,  // never hold reading back a file the model wrote this session

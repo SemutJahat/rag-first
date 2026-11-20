@@ -9,6 +9,7 @@
   "display": "all",
   "maxDenials": 3,
   "pinTools": true,
+  "indexNew": true,
   "allowSearchTools": false,
   "exemptPromptFiles": true,
   "exemptWrittenFiles": true,

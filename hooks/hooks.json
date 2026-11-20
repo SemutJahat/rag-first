@@ -17,7 +17,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Grep|Glob|Read|Bash|mcp__enowx-rag__rag_semantic_search|mcp__enowx-rag__rag_retrieve_context",
+        "matcher": "Grep|Glob|Read|Bash|mcp__enowx-rag__rag_semantic_search|mcp__enowx-rag__rag_retrieve_context|mcp__enowx-rag__rag_index_project",
         "hooks": [
           {
             "type": "command",
@@ -29,7 +29,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "mcp__enowx-rag__rag_semantic_search|mcp__enowx-rag__rag_retrieve_context|Write|Edit|MultiEdit|NotebookEdit",
+        "matcher": "mcp__enowx-rag__rag_semantic_search|mcp__enowx-rag__rag_retrieve_context|mcp__enowx-rag__rag_index_project|Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",

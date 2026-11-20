@@ -9,11 +9,13 @@
 import type { Register } from 'claude-code'
 
 const PIN = /^mcp__enowx-rag__rag_(retrieve_context|semantic_search)$/
+// In a project that isn't indexed yet (indexNew), the index tool is pinned as well: it is the first call needed.
+const INDEX = 'mcp__enowx-rag__rag_index_project'
 
 // Once per session process (a module reload asks again).
-let verdict: Promise<{ pin?: boolean }> | undefined
+let verdict: Promise<{ pin?: boolean; index?: boolean }> | undefined
 
-async function decide($: any): Promise<{ pin?: boolean }> {
+async function decide($: any): Promise<{ pin?: boolean; index?: boolean }> {
   try {
     let cwd: string | undefined
     let sessionId: string | undefined
@@ -34,7 +36,7 @@ export const register: Register = on => {
     const r = await next(e)
     verdict ??= decide($)
     const v = await verdict
-    return PIN.test(e.tool) && v.pin ? { ...r, isDeferred: false } : r
+    return v.pin && (PIN.test(e.tool) || (v.index && e.tool === INDEX)) ? { ...r, isDeferred: false } : r
   // If anything above throws, the tool keeps the engine's placement.
   }).catch(($, e, next) => next(e))
 }

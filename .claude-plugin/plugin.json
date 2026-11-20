@@ -1,6 +1,6 @@
 {
   "name": "rag-first",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Makes Claude Code search the project's enowx-rag RAG before it greps or reads around: Grep, Glob, Read and search-like Bash wait until one RAG search has run for the prompt.",
   "author": {
     "name": "SemutJahat",

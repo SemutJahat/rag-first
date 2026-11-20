@@ -102,12 +102,12 @@ test('display "changes" hides the searched line, "off" hides all lines; decision
   assert.equal(o.systemMessage, undefined);
 });
 
-test('gate off: ENOWX_SESSION, a non-indexed project, no git root, no MCP server', () => {
+test('gate off: ENOWX_SESSION, a non-indexed project with indexNew off, no git root, no MCP server', () => {
   const enowx = world({ env: { ENOWX_SESSION: 'x' } });
   enowx.prompt();
   assert.equal(enowx.pre('Grep', { pattern: 'a' }), undefined);
 
-  const plain = world();
+  const plain = world({ config: { indexNew: false } });
   const note = plain.ev('UserPromptSubmit', { cwd: '/home/u/code/plain', prompt: 'hi' });
   assert.match(note.systemMessage, /off here: project not indexed in enowx-rag \(would be project_id "plain"\)/);
   assert.equal(plain.ev('PreToolUse', { cwd: '/home/u/code/plain', tool_name: 'Grep', tool_input: { pattern: 'a' } }), undefined);
@@ -199,8 +199,109 @@ test('pinDecision: pins in an indexed project, records the MCP server, not elsew
   const w = world();
   assert.deepEqual(pinDecision({ cwd: ANT, session_id: 's1' }, w.io), { pin: true, project_id: 'antares' });
   assert.ok(w.m.fs.existsSync('/data/state/s1.mcp'));
-  assert.equal(pinDecision({ cwd: '/home/u/code/plain', session_id: 's2' }, w.io).pin, false);
+  assert.deepEqual(pinDecision({ cwd: '/home/u/code/plain', session_id: 's2' }, w.io), { pin: true, index: true, project_id: 'plain' });
+  assert.equal(pinDecision({ cwd: '/tmp/loose', session_id: 's4' }, w.io).pin, false);
+  const noIdx = world({ config: { indexNew: false } });
+  assert.equal(pinDecision({ cwd: '/home/u/code/plain', session_id: 's2' }, noIdx.io).pin, false);
   assert.equal(pinDecision({ cwd: ANT, session_id: 's3' }, { ...w.io, env: { ...w.io.env, ENOWX_SESSION: '1' } }).pin, false);
   const np = world({ config: { pinTools: false } });
   assert.equal(pinDecision({ cwd: ANT, session_id: 's1' }, np.io).pin, false);
+});
+
+// ---- indexNew: a git project that isn't in enowx-rag yet ----------------------------------------------
+
+const PLAIN = '/home/u/code/plain';
+const IDX = 'mcp__enowx-rag__rag_index_project';
+
+function plainWorld(opts) {
+  const w = world(opts);
+  const at = (hook_event_name, extra = {}) => w.ev(hook_event_name, { cwd: PLAIN, ...extra });
+  return {
+    ...w,
+    prompt: (p = 'build the thing') => at('UserPromptSubmit', { prompt: p }),
+    pre: (tool_name, tool_input) => at('PreToolUse', { tool_name, tool_input }),
+    post: (tool_name, tool_input = {}) => at('PostToolUse', { tool_name, tool_input }),
+    at,
+  };
+}
+
+test('indexNew: an unindexed git project tells the model to index it, every prompt until it is', () => {
+  const w = plainWorld();
+  const o = w.prompt();
+  const ctx = o.hookSpecificOutput.additionalContext;
+  assert.equal(o.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+  assert.match(ctx, /rag_index_project with project_id "plain" and directory "\/home\/u\/code\/plain"/);
+  assert.match(ctx, /use "code-plain"/);
+  assert.match(o.systemMessage, /not indexed in enowx-rag yet · asked Claude to index it as "plain"/);
+  const again = w.prompt('next');
+  assert.match(again.hookSpecificOutput.additionalContext, /rag_index_project/);
+  assert.equal(again.systemMessage, undefined, 'the user sees the line once per session');
+  assert.equal(w.log()[0].decision, 'index-needed');
+});
+
+test('indexNew: gated tools are denied until rag_index_project succeeds; a search does not count', () => {
+  const w = plainWorld();
+  w.prompt();
+  const d = w.pre('Grep', { pattern: 'main' });
+  assert.equal(decision(d), 'deny');
+  assert.match(d.hookSpecificOutput.permissionDecisionReason, /not indexed.*rag_index_project with project_id "plain"/);
+  assert.match(d.hookSpecificOutput.permissionDecisionReason, /select:mcp__enowx-rag__rag_index_project/);
+  assert.match(d.systemMessage, /held Grep until indexing \(plain\) · 1\/3/);
+  w.post(RAG, { project_id: 'plain', query: 'x' });
+  assert.equal(decision(w.pre('Read', { file_path: `${PLAIN}/main.go` })), 'deny', 'searching an empty project does not open it');
+  assert.equal(w.pre(IDX, { project_id: 'plain', directory: PLAIN }), undefined, 'the index call itself is never held');
+  const done = w.post(IDX, { project_id: 'plain', directory: PLAIN });
+  assert.match(done.systemMessage, /project indexed \(plain\)/);
+  assert.equal(w.pre('Grep', { pattern: 'main' }), undefined);
+  assert.equal(w.prompt('later').hookSpecificOutput, undefined, 'no index request once indexed');
+});
+
+test('indexNew: once project_dirs.json lists the folder, the normal search gate takes over', () => {
+  const w = plainWorld();
+  w.prompt();
+  w.m.fs.writeFileSync(`${HOME}/.enowx-rag/project_dirs.json`, JSON.stringify({ antares: [ANT], plain: [PLAIN] }));
+  w.prompt('next');
+  const d = w.pre('Grep', { pattern: 'main' });
+  assert.match(d.hookSpecificOutput.permissionDecisionReason, /search this project's RAG.*project_id "plain"/);
+});
+
+test('indexNew: a refused, failed or unfinished index call lets tools through for the prompt', () => {
+  for (const ev of ['PermissionDenied', 'PostToolUseFailure']) {
+    const w = plainWorld();
+    w.prompt();
+    const o = w.at(ev, { tool_name: IDX, tool_input: { project_id: 'plain' }, error: 'nope' });
+    assert.match(o.systemMessage, /indexing (not permitted|failed); Grep\/Glob\/Read\/Bash let through/);
+    assert.equal(w.pre('Grep', { pattern: 'a' }), undefined);
+    w.prompt('next');
+    assert.equal(decision(w.pre('Grep', { pattern: 'a' })), 'deny', 'held again on the next prompt');
+  }
+  const w = plainWorld();
+  w.prompt();
+  w.pre(IDX, { project_id: 'plain', directory: PLAIN });
+  assert.equal(w.pre('Grep', { pattern: 'a' }), undefined, 'called but never completed');
+});
+
+test('indexNew: loop guard, nudge mode, no MCP server, indexNew off', () => {
+  const g = plainWorld({ config: { maxDenials: 1 } });
+  g.prompt();
+  assert.equal(decision(g.pre('Grep', { pattern: 'a' })), 'deny');
+  const through = g.pre('Grep', { pattern: 'b' });
+  assert.equal(decision(through), undefined);
+  assert.match(through.systemMessage, /after 1 denials without indexing \(loop guard\)/);
+
+  const n = plainWorld({ config: { mode: 'nudge' } });
+  n.prompt();
+  const o = n.pre('Grep', { pattern: 'a' });
+  assert.equal(decision(o), undefined);
+  assert.match(o.hookSpecificOutput.additionalContext, /rag_index_project/);
+
+  const nomcp = plainWorld({ files: { [T]: JSON.stringify({ attachment: { type: 'deferred_tools_delta', addedNames: ['Monitor'] } }) + '\n' } });
+  const p = nomcp.prompt();
+  assert.equal(p.hookSpecificOutput, undefined, 'no index request without the MCP server');
+  assert.match(p.systemMessage, /off here: project not indexed/);
+  assert.equal(nomcp.pre('Grep', { pattern: 'a' }), undefined);
+
+  const off = plainWorld({ config: { indexNew: false } });
+  assert.equal(off.prompt().hookSpecificOutput, undefined);
+  assert.equal(off.pre('Grep', { pattern: 'a' }), undefined);
 });

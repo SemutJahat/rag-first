@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- The PostToolUseFailure and PermissionDenied hooks now also match `rag_index_project`, so a refused or
+  failed index call opens the gate at once with its own line (0.2.0 only caught it on the next held call).
+
 ## 0.2.0
 
 - **New projects get indexed** (`indexNew`, on by default). In a git project that isn't in

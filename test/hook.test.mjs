@@ -62,3 +62,13 @@ test('log viewer with no log yet', () => {
   const { run } = setup();
   assert.match(run(LOG, '').stdout, /no decisions yet/);
 });
+
+test('hooks.json: every hook that sees the search tools also sees rag_index_project', async () => {
+  const { readFileSync } = await import('node:fs');
+  const h = JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8')).hooks;
+  for (const [ev, list] of Object.entries(h)) {
+    for (const e of list) {
+      if (e.matcher && e.matcher.includes('rag_retrieve_context')) assert.match(e.matcher, /rag_index_project/, ev);
+    }
+  }
+});

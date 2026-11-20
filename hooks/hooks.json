@@ -41,7 +41,7 @@
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "mcp__enowx-rag__rag_semantic_search|mcp__enowx-rag__rag_retrieve_context",
+        "matcher": "mcp__enowx-rag__rag_semantic_search|mcp__enowx-rag__rag_retrieve_context|mcp__enowx-rag__rag_index_project",
         "hooks": [
           {
             "type": "command",
@@ -53,7 +53,7 @@
     ],
     "PermissionDenied": [
       {
-        "matcher": "mcp__enowx-rag__rag_semantic_search|mcp__enowx-rag__rag_retrieve_context",
+        "matcher": "mcp__enowx-rag__rag_semantic_search|mcp__enowx-rag__rag_retrieve_context|mcp__enowx-rag__rag_index_project",
         "hooks": [
           {
             "type": "command",
